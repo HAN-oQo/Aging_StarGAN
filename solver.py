@@ -38,6 +38,13 @@ class Solver(object):
         self.lambda_rec = config.lambda_rec
         self.lambda_gp = config.lambda_gp
         self.lambda_KL = config.lambda_KL
+        self.lambda_ID = config.lambda_ID
+        self.lambda_ma = config.lambda_ma
+        self.lambda_ms = config.lambda_ms
+
+
+
+
         # Training configurations.
         self.dataset = config.dataset
         self.batch_size = config.batch_size
@@ -52,6 +59,7 @@ class Solver(object):
         self.selected_attrs = config.selected_attrs
         self.age_group = config.age_group
         self.age_group_mode = config.age_group_mode
+        
         # Test configurations.
         self.test_iters = config.test_iters
 
@@ -70,9 +78,12 @@ class Solver(object):
         self.sample_step = config.sample_step
         self.model_save_step = config.model_save_step
         self.lr_update_step = config.lr_update_step
-
         self.loss_type = config.loss_type
         self.temperature = config.temperature
+
+        self.mask_activation_loss = torch.mean()
+        self.identity_loss = nn.L1Loss()
+
         # Build the model and tensorboard.
         self.build_model()
         if self.use_tensorboard:
@@ -83,6 +94,10 @@ class Solver(object):
         # self.classifier = classifier.to(self.device)
         
         # print("Classifier loaded")
+
+    def mask_smooth_loss(x):
+        return torch.sum(torch.abs(x[:, :, :, :-1] - x[:, :, :, 1:])) + \
+           torch.sum(torch.abs(x[:, :, :-1, :] - x[:, :, 1:, :]))
 
     def build_model(self):
         """Create a generator and a discriminator."""
@@ -319,7 +334,11 @@ class Solver(object):
             d_loss_cls = self.classification_loss(out_cls, label_org, self.dataset, 'CE')
 
             # Compute loss with fake images.
-            x_fake = self.G(x_real, c_trg)
+            if self.attention != True:
+                x_fake = self.G(x_real, c_trg)
+            else:
+                x_fake, mask_fake  = self.G(x_real, c_trg)
+                x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
             out_src, out_cls = self.D(x_fake.detach())
             d_loss_fake = torch.mean(out_src)
 
@@ -348,18 +367,39 @@ class Solver(object):
             # =================================================================================== #
             
             if (i+1) % self.n_critic == 0:
+
+                # Identity mapping
+                if self.attention != True:
+                    x_id = self.G(x_real, c_org)
+                else:
+                    x_id, mask_id = self.G(x_real, c_org)
+                    x_id = mask_id * x_real + (1-mask_id) * x_id 
+                
+                g_loss_identity = self.identity_loss(x_id , x_real)
+
                 # Original-to-target domain.
-                x_fake = self.G(x_real, c_trg)
+                if self.attention != True:
+                    x_fake = self.G(x_real, c_trg)
+                else:
+                    x_fake, mask_fake  = self.G(x_real, c_trg)
+                    x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
+
                 out_src, out_cls = self.D(x_fake)
                 g_loss_fake = - torch.mean(out_src)
                 g_loss_cls = self.classification_loss(out_cls, label_trg, self.dataset,'CE')
 
                 # Target-to-original domain.
-                x_reconst = self.G(x_fake, c_org)
-                g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
+                if self.attention != True:
+                    x_reconst = self.G(x_fake, c_org)
+                else:
+                    x_reconst, mask_reconst = self.G(x_fake, c_org)
+                    x_reconst = mask_reconst * x_fake + (1-mask_reconst) * x_reconst
+                
+                    g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
 
+                    g_mask_activation_loss =  self.mask_activation_loss(mask_fake) + self.mask_activation_loss(mask_reconst)
+                    g_mask_smooth_loss = self.mask_smooth_loss(mask_fake) + self.mask_smooth_loss(mask_reconst)
 
-                #Identity Mapping
 
 
                 # real_pred, reg_loss0 = self.classifier(x_real)
@@ -368,7 +408,10 @@ class Solver(object):
                 # print(fake_pred, fake_pred.size())
                 # KLloss =  self.classification_loss( fake_pred, real_pred, self.dataset,'LOGIT_MSE')
                 # Backward and optimize.
-                g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls
+                if self.attention != True:
+                    g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls
+                else:
+                    g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls + self.lambda_ID * g_loss_identity + self.lambda_ma *g_mask_activation_loss + self.lambda_ms * g_mask_smooth_loss 
                 # g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_KL * KLloss
                 self.reset_grad()
                 g_loss.backward()
@@ -378,6 +421,11 @@ class Solver(object):
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_rec'] = g_loss_rec.item()
                 loss['G/loss_cls'] = g_loss_cls.item()
+                if self.attention == True:
+                    loss['G/loss_id'] = g_loss_identity.item()
+                    loss['G/loss_mask_activation'] = g_mask_activation_loss.item()
+                    loss['G/loss_mask_smooth'] = g_mask_smooth_loss.item()
+
                 # loss['G/loss_KL_div'] = KLloss.item()
 
             # =================================================================================== #
@@ -399,14 +447,32 @@ class Solver(object):
 
             # Translate fixed images for debugging.
             if (i+1) % self.sample_step == 0:
-                with torch.no_grad():
-                    x_fake_list = [x_fixed]
-                    for c_fixed in c_fixed_list:
-                        x_fake_list.append(self.G(x_fixed, c_fixed))
-                    x_concat = torch.cat(x_fake_list, dim=3)
-                    sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
-                    save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
-                    print('Saved real and fake images into {}...'.format(sample_path))
+                if self.attention != True:
+                    with torch.no_grad():
+                        x_fake_list = [x_fixed]
+                        for c_fixed in c_fixed_list:
+                            x_fake_list.append(self.G(x_fixed, c_fixed))
+                        x_concat = torch.cat(x_fake_list, dim=3)
+                        sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
+                        save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
+                        print('Saved real and fake images into {}...'.format(sample_path))
+                else:
+                     with torch.no_grad():
+                        x_fake_list = [x_fixed]
+                        x_mask_list = [x_fixed]
+                        for c_fixed in c_fixed_list:
+                            images, masks = self.G(x_fixed, c_fixed)
+                            images = masks * x_fixed + (1-masks) * images
+                            x_fake_list.append(images)
+                            x_mask_list.append(masks)
+
+                        x_concat = torch.cat(x_fake_list, dim=3)
+                        mask_concat = torch.cat(x_mask_list, dim=3)
+                        sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
+                        mask_sample_path = os.path.join(self.sample_dir, '{}-masks.jpg'.format(i+1))
+                        save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
+                        save_image(self.denorm(mask_concat.data.cpu()), sample_path, nrow=1, padding=0)
+                        print('Saved real and fake images into {}...'.format(sample_path))
 
             # Save model checkpoints.
             if (i+1) % self.model_save_step == 0:
@@ -508,7 +574,12 @@ class Solver(object):
                 d_loss_cls = self.classification_loss(out_cls, label_org, dataset)
 
                 # Compute loss with fake images.
-                x_fake = self.G(x_real, c_trg)
+                if self.attention != True:
+                    x_fake = self.G(x_real, c_trg)
+                else:
+                    x_fake, mask_fake  = self.G(x_real, c_trg)
+                    x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
+
                 out_src, _ = self.D(x_fake.detach())
                 d_loss_fake = torch.mean(out_src)
 
@@ -536,15 +607,29 @@ class Solver(object):
                 # =================================================================================== #
 
                 if (i+1) % self.n_critic == 0:
+                    if self.attention != True:
+                        x_id = self.G(x_real, c_org)
+                    else:
+                        x_id, mask_id = self.G(x_real, c_org)
+                        x_id = mask_id * x_real + (1-mask_id) * x_id 
+                    
+                    
                     # Original-to-target domain.
-                    x_fake = self.G(x_real, c_trg)
+                    if self.attention != True:
+                        x_fake = self.G(x_real, c_trg)
+                    else:
+                        x_fake, mask_fake  = self.G(x_real, c_trg)
+                        x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
+                        
                     out_src, out_cls = self.D(x_fake)
                     out_cls = out_cls[:, :self.c_dim] if dataset == 'CelebA' else out_cls[:, self.c_dim:]
                     g_loss_fake = - torch.mean(out_src)
                     g_loss_cls = self.classification_loss(out_cls, label_trg, dataset)
 
                     # Target-to-original domain.
+                    
                     x_reconst = self.G(x_fake, c_org)
+                    
                     g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
 
                     # Backward and optimize.

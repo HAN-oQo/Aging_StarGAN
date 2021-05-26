@@ -76,7 +76,7 @@ class Generator(nn.Module):
             feat = self.main(x)
             mask = self.attn(feat)
             img = self.chunk(feat)
-            return mask, img
+            return img, mask
         else:
             return self.main(x)
 

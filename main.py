@@ -76,6 +76,11 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_rec', type=float, default=10, help='weight for reconstruction loss')
     parser.add_argument('--lambda_gp', type=float, default=10, help='weight for gradient penalty')
     parser.add_argument('--lambda_KL', type=float, default=10, help='weight for KL DIV loss')
+    parser.add_argument('--lambda_ID', type=float, default=10, help='weight for Identity loss')
+    parser.add_argument('--lambda_ma', type=float, default=10, help='weight for Identity loss')
+    parser.add_argument('--lambda_ms', type=float, default=10, help='weight for Identity loss')
+
+
     parser.add_argument('--age_group', type=int, default=5, help='number of age groups')
     
     # Training configuration.
