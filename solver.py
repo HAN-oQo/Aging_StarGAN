@@ -3,23 +3,29 @@ from model import Discriminator
 from torch.autograd import Variable
 from torchvision.utils import save_image
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import os
 import time
 import datetime
+from age_classifier_v2 import age_classifier_v2
 
+# CACD_loss = 'CE'
+# Temperature = 10.0
 
 class Solver(object):
     """Solver for training and testing StarGAN."""
 
-    def __init__(self, celeba_loader, rafd_loader, config):
+    def __init__(self, celeba_loader, rafd_loader, CACD_loader, config):
         """Initialize configurations."""
 
         # Data loader.
         self.celeba_loader = celeba_loader
         self.rafd_loader = rafd_loader
-
+        self.CACD_loader = CACD_loader
+        self.attention = config.attention
+        
         # Model configurations.
         self.c_dim = config.c_dim
         self.c2_dim = config.c2_dim
@@ -31,7 +37,7 @@ class Solver(object):
         self.lambda_cls = config.lambda_cls
         self.lambda_rec = config.lambda_rec
         self.lambda_gp = config.lambda_gp
-
+        self.lambda_KL = config.lambda_KL
         # Training configurations.
         self.dataset = config.dataset
         self.batch_size = config.batch_size
@@ -44,7 +50,8 @@ class Solver(object):
         self.beta2 = config.beta2
         self.resume_iters = config.resume_iters
         self.selected_attrs = config.selected_attrs
-
+        self.age_group = config.age_group
+        self.age_group_mode = config.age_group_mode
         # Test configurations.
         self.test_iters = config.test_iters
 
@@ -57,22 +64,30 @@ class Solver(object):
         self.sample_dir = config.sample_dir
         self.model_save_dir = config.model_save_dir
         self.result_dir = config.result_dir
-
+        self.classifier_dir = config.classifier_dir
         # Step size.
         self.log_step = config.log_step
         self.sample_step = config.sample_step
         self.model_save_step = config.model_save_step
         self.lr_update_step = config.lr_update_step
 
+        self.loss_type = config.loss_type
+        self.temperature = config.temperature
         # Build the model and tensorboard.
         self.build_model()
         if self.use_tensorboard:
             self.build_tensorboard()
 
+        # classifier = age_classifier_v2.Hybridmodel(self.age_group)
+        # classifier.load_state_dict(torch.load(self.classifier_dir))
+        # self.classifier = classifier.to(self.device)
+        
+        # print("Classifier loaded")
+
     def build_model(self):
         """Create a generator and a discriminator."""
-        if self.dataset in ['CelebA', 'RaFD']:
-            self.G = Generator(self.g_conv_dim, self.c_dim, self.g_repeat_num)
+        if self.dataset in ['CelebA', 'RaFD', 'CACD']:
+            self.G = Generator(self.attention ,self.g_conv_dim, self.c_dim, self.g_repeat_num)
             self.D = Discriminator(self.image_size, self.d_conv_dim, self.c_dim, self.d_repeat_num) 
         elif self.dataset in ['Both']:
             self.G = Generator(self.g_conv_dim, self.c_dim+self.c2_dim+2, self.g_repeat_num)   # 2 for mask vector.
@@ -100,8 +115,8 @@ class Solver(object):
         print('Loading the trained models from step {}...'.format(resume_iters))
         G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(resume_iters))
         D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(resume_iters))
-        self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
-        self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
+        self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage), strict = False)
+        self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage), strict = False)
 
     def build_tensorboard(self):
         """Build a tensorboard logger."""
@@ -146,7 +161,9 @@ class Solver(object):
         out[np.arange(batch_size), labels.long()] = 1
         return out
 
-    def create_labels(self, c_org, c_dim=5, dataset='CelebA', selected_attrs=None):
+
+
+    def create_labels(self, c_org, c_dim=6, dataset='CelebA', selected_attrs=None):
         """Generate target domain labels for debugging and testing."""
         # Get hair color indices.
         if dataset == 'CelebA':
@@ -168,16 +185,52 @@ class Solver(object):
                     c_trg[:, i] = (c_trg[:, i] == 0)  # Reverse attribute value.
             elif dataset == 'RaFD':
                 c_trg = self.label2onehot(torch.ones(c_org.size(0))*i, c_dim)
+            
+            elif dataset == 'CACD':
+                if self.age_group_mode == 2:
+                    c_trg = self.label2onehot(torch.ones(c_org.size(0))*i, c_dim)
+                else:
+                    # print(c_org)
+                    # print(c_org.size())
+                    c_trg = torch.zeros(c_org.size())
+                    # print(c_trg.size())
+                    c_trg[:, i] = 1
 
             c_trg_list.append(c_trg.to(self.device))
+        # print(c_org)
+        # print(c_trg)
+        # print(c_trg.size())
+        # print(c_trg_list)
+        # print(c_trg_list)
+        
         return c_trg_list
 
-    def classification_loss(self, logit, target, dataset='CelebA'):
+    def classification_loss(self, logit, target, dataset='CelebA', loss_type = 'BCE'):
         """Compute binary or softmax cross entropy loss."""
         if dataset == 'CelebA':
             return F.binary_cross_entropy_with_logits(logit, target, size_average=False) / logit.size(0)
         elif dataset == 'RaFD':
             return F.cross_entropy(logit, target)
+        elif dataset == 'CACD':
+            if loss_type == 'BCE': 
+                loss = nn.BCEWithLogitsLoss(size_average = False)
+                return loss(logit, target) / logit.size(0)
+            elif loss_type == 'LOGIT_MSE': # Trick: prediction with log_softmax, target with softmax
+                # Wrong implementation. KLDIV loss input should be a prob distribution. Not hard label.
+                loss = nn.KLDivLoss(reduction = 'batchmean')
+                prediction = F.log_softmax(logit/self.temperature, dim = 1)
+                target_tensor = F.softmax(target/self.temperature , dim = 1) # target = [0 1 0 0]
+                return loss(prediction, target_tensor) * (self.temperature**2)
+            else:
+                # one hot vector to label?
+                loss = nn.CrossEntropyLoss()
+                return loss(logit, target)
+    
+    def make_label_usable(self, label):
+        if self.age_group_mode == 2:
+            label = label.long()
+            label = label.view(label.size(0))
+        return label
 
     def train(self):
         """Train StarGAN within a single dataset."""
@@ -186,12 +239,24 @@ class Solver(object):
             data_loader = self.celeba_loader
         elif self.dataset == 'RaFD':
             data_loader = self.rafd_loader
+        elif self.dataset == 'CACD':
+            data_loader = self.CACD_loader
+
+        
+       
 
         # Fetch fixed inputs for debugging.
         data_iter = iter(data_loader)
-        x_fixed, c_org = next(data_iter)
+        filename, x_fixed, c_org = next(data_iter)
+        c_org = self.make_label_usable(c_org)
+
+        print(c_org)
         x_fixed = x_fixed.to(self.device)
-        c_fixed_list = self.create_labels(c_org, self.c_dim, self.dataset, self.selected_attrs)
+    
+        if self.dataset == 'CACD':
+            c_fixed_list = self.create_labels(c_org, self.c_dim, self.dataset, self.age_group)
+        else:
+            c_fixed_list = self.create_labels(c_org, self.c_dim, self.dataset, self.selected_attrs)
 
         # Learning rate cache for decaying.
         g_lr = self.g_lr
@@ -214,10 +279,12 @@ class Solver(object):
 
             # Fetch real images and labels.
             try:
-                x_real, label_org = next(data_iter)
+                filename, x_real, label_org = next(data_iter)
             except:
                 data_iter = iter(data_loader)
-                x_real, label_org = next(data_iter)
+                filename, x_real, label_org = next(data_iter)
+            
+            label_org = self.make_label_usable(label_org)
 
             # Generate target domain labels randomly.
             rand_idx = torch.randperm(label_org.size(0))
@@ -226,16 +293,22 @@ class Solver(object):
             if self.dataset == 'CelebA':
                 c_org = label_org.clone()
                 c_trg = label_trg.clone()
-            elif self.dataset == 'RaFD':
+            elif self.dataset == 'RaFD' :
                 c_org = self.label2onehot(label_org, self.c_dim)
                 c_trg = self.label2onehot(label_trg, self.c_dim)
+            elif self.dataset =='CACD' and self.age_group_mode == 2 :                
+                c_org = self.label2onehot(label_org, self.c_dim)
+                c_trg = self.label2onehot(label_trg, self.c_dim)
+            elif self.dataset =='CACD' :                
+                c_org = label_org.clone()
+                c_trg = label_trg.clone()
 
             x_real = x_real.to(self.device)           # Input images.
             c_org = c_org.to(self.device)             # Original domain labels.
             c_trg = c_trg.to(self.device)             # Target domain labels.
             label_org = label_org.to(self.device)     # Labels for computing classification loss.
             label_trg = label_trg.to(self.device)     # Labels for computing classification loss.
-
+            # self.classifier = self.classifier.to(self.device)
             # =================================================================================== #
             #                             2. Train the discriminator                              #
             # =================================================================================== #
@@ -243,7 +316,7 @@ class Solver(object):
             # Compute loss with real images.
             out_src, out_cls = self.D(x_real)
             d_loss_real = - torch.mean(out_src)
-            d_loss_cls = self.classification_loss(out_cls, label_org, self.dataset)
+            d_loss_cls = self.classification_loss(out_cls, label_org, self.dataset, 'CE')
 
             # Compute loss with fake images.
             x_fake = self.G(x_real, c_trg)
@@ -258,6 +331,7 @@ class Solver(object):
 
             # Backward and optimize.
             d_loss = d_loss_real + d_loss_fake + self.lambda_cls * d_loss_cls + self.lambda_gp * d_loss_gp
+            # d_loss = d_loss_real + d_loss_fake  + self.lambda_gp * d_loss_gp
             self.reset_grad()
             d_loss.backward()
             self.d_optimizer.step()
@@ -278,14 +352,24 @@ class Solver(object):
                 x_fake = self.G(x_real, c_trg)
                 out_src, out_cls = self.D(x_fake)
                 g_loss_fake = - torch.mean(out_src)
-                g_loss_cls = self.classification_loss(out_cls, label_trg, self.dataset)
+                g_loss_cls = self.classification_loss(out_cls, label_trg, self.dataset,'CE')
 
                 # Target-to-original domain.
                 x_reconst = self.G(x_fake, c_org)
                 g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
 
+
+                #Identity Mapping
+
+
+                # real_pred, reg_loss0 = self.classifier(x_real)
+                # fake_pred, reg_loss1 = self.classifier(x_fake)
+                # print(real_pred, real_pred.size())
+                # print(fake_pred, fake_pred.size())
+                # KLloss =  self.classification_loss( fake_pred, real_pred, self.dataset,'LOGIT_MSE')
                 # Backward and optimize.
                 g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls
+                # g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_KL * KLloss
                 self.reset_grad()
                 g_loss.backward()
                 self.g_optimizer.step()
@@ -294,6 +378,7 @@ class Solver(object):
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_rec'] = g_loss_rec.item()
                 loss['G/loss_cls'] = g_loss_cls.item()
+                # loss['G/loss_KL_div'] = KLloss.item()
 
             # =================================================================================== #
             #                                 4. Miscellaneous                                    #
@@ -345,7 +430,7 @@ class Solver(object):
         rafd_iter = iter(self.rafd_loader)
 
         # Fetch fixed inputs for debugging.
-        x_fixed, c_org = next(celeba_iter)
+        filename, x_fixed, c_org = next(celeba_iter)
         x_fixed = x_fixed.to(self.device)
         c_celeba_list = self.create_labels(c_org, self.c_dim, 'CelebA', self.selected_attrs)
         c_rafd_list = self.create_labels(c_org, self.c2_dim, 'RaFD')
@@ -378,14 +463,14 @@ class Solver(object):
                 data_iter = celeba_iter if dataset == 'CelebA' else rafd_iter
                 
                 try:
-                    x_real, label_org = next(data_iter)
+                    filename, x_real, label_org = next(data_iter)
                 except:
                     if dataset == 'CelebA':
                         celeba_iter = iter(self.celeba_loader)
-                        x_real, label_org = next(celeba_iter)
+                        filename, x_real, label_org = next(celeba_iter)
                     elif dataset == 'RaFD':
                         rafd_iter = iter(self.rafd_loader)
-                        x_real, label_org = next(rafd_iter)
+                        filename, x_real, label_org = next(rafd_iter)
 
                 # Generate target domain labels randomly.
                 rand_idx = torch.randperm(label_org.size(0))
@@ -530,24 +615,87 @@ class Solver(object):
             data_loader = self.celeba_loader
         elif self.dataset == 'RaFD':
             data_loader = self.rafd_loader
+        elif self.dataset == 'CACD':
+            data_loader = self.CACD_loader
         
         with torch.no_grad():
-            for i, (x_real, c_org) in enumerate(data_loader):
+            for i, (filename, x_real, c_org) in enumerate(data_loader):
+                print(c_org)
+                if self.dataset == 'CACD':
+                    filename = "".join(filename)
+                    for k in range(self.age_group):
+                        dir_name = 'age_group{}'.format(k)
+                        if not os.path.exists(os.path.join(self.result_dir, dir_name)):
+                            os.makedirs(os.path.join(self.result_dir, dir_name))
 
-                # Prepare input images and target domain labels.
+                if self.dataset == 'CelebA' or self.dataset == 'RaFD':
+                    # Prepare input images and target domain labels.
+                    filename = "".join(filename)
+                    filenum = filename.split('.')[0]
+                    # print(filenum)
+
+                    if not os.path.exists(os.path.join(self.result_dir, 'input')):
+                        os.makedirs(os.path.join(self.result_dir, 'input'))
+
+                    if not os.path.exists(os.path.join(self.result_dir, 'output')):
+                        os.makedirs(os.path.join(self.result_dir, 'output'))
+                    
+                    real_dir = os.path.join(self.result_dir, 'input')
+                    fake_dir = os.path.join(self.result_dir, 'output')
+
+                    if not os.path.exists(os.path.join(fake_dir, 'aging')):
+                        os.makedirs(os.path.join(fake_dir, 'aging'))
+                    aging_dir = os.path.join(fake_dir, 'aging')
+
+                    real_path = os.path.join(real_dir, '{}.jpg'.format(filenum))
+                    save_image(self.denorm(x_real), real_path)
+                    
+                
+                    
                 x_real = x_real.to(self.device)
-                c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, self.selected_attrs)
+                if self.dataset == 'CelebA':
+                    c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, self.selected_attrs)
+                elif self.dataset == 'CACD':
+                    c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, None)
 
-                # Translate images.
+                    # Translate images.
+
                 x_fake_list = [x_real]
-                for c_trg in c_trg_list:
-                    x_fake_list.append(self.G(x_real, c_trg))
+                for j, c_trg in enumerate(c_trg_list):
+                    x_fake = self.G(x_real, c_trg)
+                    # x_fake_list.append(self.G(x_real, c_trg))
+                    if self.dataset == 'CelebA':
+                        if j==0:
+                            result_path = os.path.join(fake_dir, 'Black_Hair-{}.jpg'.format(filenum))
+                        elif j==1:
+                            result_path = os.path.join(fake_dir, 'Blond_Hair-{}.jpg'.format(filenum))
+                        
+                        elif j==2:
+                            result_path = os.path.join(fake_dir, 'Brown_Hair-{}.jpg'.format(filenum))
 
+                        elif j==3:
+                            result_path = os.path.join(fake_dir, 'Gender-{}.jpg'.format(filenum))
+
+                        elif j==4:
+                            aging_path = os.path.join(aging_dir, 'Aging-{}.jpg'.format(filenum))
+                            save_image(self.denorm(x_fake.data.cpu()), aging_path)
+                            result_path = os.path.join(fake_dir, 'Aging-{}.jpg'.format(filenum))
+                    
+                    elif self.dataset == 'CACD':
+                        age_path = os.path.join(self.result_dir, 'age_group{}'.format(j))
+                        result_path = os.path.join(age_path, 'age{}_{}'.format(j, filename))
+                        
+                    save_image(self.denorm(x_fake.data.cpu()), result_path)
+                
+                
+                print('Saved real and fake images into result path, filenum: {}...'.format(i))
+                    
                 # Save the translated images.
-                x_concat = torch.cat(x_fake_list, dim=3)
-                result_path = os.path.join(self.result_dir, '{}-images.jpg'.format(i+1))
-                save_image(self.denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
-                print('Saved real and fake images into {}...'.format(result_path))
+                
+                # x_concat = torch.cat(x_fake_list, dim=3)
+                # result_path = os.path.join(self.result_dir, 'translated-{}.jpg'.format(filenum))
+                # save_image(self.denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+                # print('Saved real and fake images into {}...'.format(result_path))
 
     def test_multi(self):
         """Translate images using StarGAN trained on multiple datasets."""
@@ -555,7 +703,7 @@ class Solver(object):
         self.restore_model(self.test_iters)
         
         with torch.no_grad():
-            for i, (x_real, c_org) in enumerate(self.celeba_loader):
+            for i, (filename, x_real, c_org) in enumerate(self.celeba_loader):
 
                 # Prepare input images and target domain labels.
                 x_real = x_real.to(self.device)
