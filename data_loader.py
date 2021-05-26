@@ -5,6 +5,8 @@ from PIL import Image
 import torch
 import os
 import random
+import glob
+import shutil
 
 
 class CelebA(data.Dataset):
@@ -36,6 +38,10 @@ class CelebA(data.Dataset):
             self.attr2idx[attr_name] = i
             self.idx2attr[i] = attr_name
 
+        if not os.path.exists('data/celeba/images/test'):
+            os.makedirs('data/celeba/images/test')
+        
+
         lines = lines[2:]
         random.seed(1234)
         random.shuffle(lines)
@@ -51,8 +57,28 @@ class CelebA(data.Dataset):
 
             if (i+1) < 2000:
                 self.test_dataset.append([filename, label])
+                if not os.path.exists('data/celeba/test'):
+                    os.makedirs('data/celeba/test')
+                src_dir = 'data/celeba/images'
+                dst_dir = 'data/celeba/test'
+                jpgfile = os.path.join(src_dir, filename)
+                count = 0
+                if not os.path.exists(os.path.join(dst_dir, filename)):
+                    shutil.copy(jpgfile, dst_dir)
+                
             else:
                 self.train_dataset.append([filename, label])
+        
+        ## for counting number of test dataset
+        # for path in os.listdir(dst_dir):
+        #     if os.path.isfile(os.path.join(dst_dir, path)):
+        #         count +=1
+        # print(count)
+
+        print(filename)
+        print("test dataset length: ", len(self.test_dataset))
+        print("train dataset length: ", len(self.train_dataset))
+
 
         print('Finished preprocessing the CelebA dataset...')
 
@@ -61,7 +87,7 @@ class CelebA(data.Dataset):
         dataset = self.train_dataset if self.mode == 'train' else self.test_dataset
         filename, label = dataset[index]
         image = Image.open(os.path.join(self.image_dir, filename))
-        return self.transform(image), torch.FloatTensor(label)
+        return filename, self.transform(image), torch.FloatTensor(label)
 
     def __len__(self):
         """Return the number of images."""
@@ -85,8 +111,15 @@ def get_loader(image_dir, attr_path, selected_attrs, crop_size=178, image_size=1
     elif dataset == 'RaFD':
         dataset = ImageFolder(image_dir, transform)
 
-    data_loader = data.DataLoader(dataset=dataset,
-                                  batch_size=batch_size,
-                                  shuffle=(mode=='train'),
-                                  num_workers=num_workers)
+    if mode == 'train':
+        data_loader = data.DataLoader(dataset=dataset,
+                                    batch_size=batch_size,
+                                    shuffle=(mode=='train'),
+                                    num_workers=num_workers)
+    else:
+        data_loader = data.DataLoader(dataset=dataset,
+                                    batch_size=1,
+                                    shuffle=(mode=='train'),
+                                    num_workers=num_workers)
+
     return data_loader
