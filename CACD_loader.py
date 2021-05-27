@@ -15,7 +15,7 @@ import numpy as np
 class CACD(data.Dataset):
     """Dataset class for the CACD dataset"""
     
-    def __init__(self, image_dir, attr_path, age_group, age_group_mode,  transform, mode ):
+    def __init__(self, image_dir, attr_path, age_group, age_group_mode,  additional_dataset, transform, mode ):
         """Initialize and preprocess the CACD dataset / num of data: 163446 / age max: 62, min: 14 """
         
         self.image_dir = image_dir
@@ -31,6 +31,7 @@ class CACD(data.Dataset):
            self.age_group = self.age_group
         self.transform = transform
         self.mode = mode
+        self.additional_dataset = additional_dataset
         self.train_dataset = []
         self.test_dataset = []
         self.preprocess()
@@ -140,18 +141,73 @@ class CACD(data.Dataset):
                     shutil.copy(jpgfile, dst_dir) 
 
             else:
-                self.train_dataset.append([filename, label])
+                jpgfile = os.path.join(src_dir, filename)
+                self.train_dataset.append([jpgfile, label])
             
-        
+        if self.additional_dataset:
+            utk_dir = '../UTKFace'
+            fgnet_dir = '../FGNET/images'
+
+            utk_list = os.listdir(utk_dir)
+            fgnet_dir = os.listdir(fgnet_dir)
+
+            utk_len = len(utk_list)
+            fgnet_len = len(fgnet_dir)
+
+            utk_idx = np.arange(utk_len)
+            fgnet_idx = np.arange(fgnet_len)
+
+            random.seed(1234)
+            random.shuffle(utk_idx)
+            random.shuffle(fgnet_idx)
+
+            for i in utk_idx:
+                filename = utk_list[i]
+                jpgfile = os.path.join(utk_dir, filename)
+                age = int(filename.split('_')[0])
+                if age <= 14:
+                    label = [0]
+                elif (age > 14) and (age <= 25):
+                    label = [1]
+                elif (age > 25) and (age <= 40):
+                    label = [2]
+                elif (age > 40) and (age <= 60):
+                    label = [3]
+                elif (age > 60):
+                    label = [4]
+                
+                self.train_dataset.append([jpgfile, label])
+            
+            print("UTKFace dataset loaded")
+            # for i in fgnet_idx:
+            #     filename = utk_list[i]
+            #     jpgfile = os.path.join(fgnet_dir, filename)
+            #     filename0 = filename.split('.')[0]
+            #     age = int(filename0.split('A')[1])
+            #     if age <= 14:
+            #         label = [0]
+            #     elif (age > 14) and (age <= 25):
+            #         label = [1]
+            #     elif (age > 25) and (age <= 40):
+            #         label = [2]
+            #     elif (age > 40) and (age <= 60):
+            #         label = [3]
+            #     elif (age > 60):
+            #         label = [4]
+                
+            #     self.train_dataset.append([jpgfile, label])
+                
+            # print("FGNET dataset loaded")
+
         print("test dataset length: ", len(self.test_dataset))
         print("train dataset length: ", len(self.train_dataset))
 
     def __getitem__(self, index):
         """Return one image and its corresponding attribute label"""
         dataset = self.train_dataset if self.mode == 'train' else self.test_dataset
-        filename, label = dataset[index]
-        image = Image.open(os.path.join(self.image_dir, filename))
-        return filename, self.transform(image), torch.FloatTensor(label)
+        jpgfile, label = dataset[index]
+        image = Image.open(os.path.join(jpgfile))
+        return jpgfile, self.transform(image), torch.FloatTensor(label)
     
     def __len__(self):
         """Return the number of iamges"""
@@ -159,7 +215,7 @@ class CACD(data.Dataset):
 
 
 
-def get_loader2(image_dir, attr_path, age_group, age_group_mode, crop_size = 230, image_size = 128, batch_size = 16, dataset = 'CACD', mode = 'train', num_workers=1):
+def get_loader2(image_dir, attr_path, age_group, age_group_mode, crop_size = 230, image_size = 128, batch_size = 16, dataset = 'CACD', additional_dataset =True, mode = 'train', num_workers=1):
     """Build and return a data loader"""
 
     transform = []
@@ -172,7 +228,7 @@ def get_loader2(image_dir, attr_path, age_group, age_group_mode, crop_size = 230
     transform = T.Compose(transform)
 
     if dataset == 'CACD':
-        dataset = CACD(image_dir, attr_path, age_group,age_group_mode, transform, mode)
+        dataset = CACD(image_dir, attr_path, age_group,age_group_mode, additional_dataset, transform, mode)
     
     if mode == 'train':
         data_loader = data.DataLoader(dataset=dataset,

@@ -81,7 +81,7 @@ class Solver(object):
         self.loss_type = config.loss_type
         self.temperature = config.temperature
 
-        self.mask_activation_loss = torch.mean()
+        
         self.identity_loss = nn.L1Loss()
 
         # Build the model and tensorboard.
@@ -94,8 +94,10 @@ class Solver(object):
         # self.classifier = classifier.to(self.device)
         
         # print("Classifier loaded")
+    def mask_activation_loss(self, x):
+        return torch.mean(x)
 
-    def mask_smooth_loss(x):
+    def mask_smooth_loss(self, x):
         return torch.sum(torch.abs(x[:, :, :, :-1] - x[:, :, :, 1:])) + \
            torch.sum(torch.abs(x[:, :, :-1, :] - x[:, :, 1:, :]))
 
@@ -339,6 +341,7 @@ class Solver(object):
             else:
                 x_fake, mask_fake  = self.G(x_real, c_trg)
                 x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
+ 
             out_src, out_cls = self.D(x_fake.detach())
             d_loss_fake = torch.mean(out_src)
 
@@ -396,6 +399,9 @@ class Solver(object):
                     x_reconst = mask_reconst * x_fake + (1-mask_reconst) * x_reconst
                 
                     g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
+
+                    # print(mask_fake, mask_fake.size())
+                    # print(mask_reconst, mask_reconst.size())
 
                     g_mask_activation_loss =  self.mask_activation_loss(mask_fake) + self.mask_activation_loss(mask_reconst)
                     g_mask_smooth_loss = self.mask_smooth_loss(mask_fake) + self.mask_smooth_loss(mask_reconst)
@@ -459,7 +465,8 @@ class Solver(object):
                 else:
                      with torch.no_grad():
                         x_fake_list = [x_fixed]
-                        x_mask_list = [x_fixed]
+                        #x_mask_list = [x_fixed]
+                        x_mask_list = []
                         for c_fixed in c_fixed_list:
                             images, masks = self.G(x_fixed, c_fixed)
                             images = masks * x_fixed + (1-masks) * images
@@ -471,7 +478,7 @@ class Solver(object):
                         sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
                         mask_sample_path = os.path.join(self.sample_dir, '{}-masks.jpg'.format(i+1))
                         save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
-                        save_image(self.denorm(mask_concat.data.cpu()), sample_path, nrow=1, padding=0)
+                        save_image(mask_concat.data.cpu(), mask_sample_path, nrow=1, padding=0, normalize = True)
                         print('Saved real and fake images into {}...'.format(sample_path))
 
             # Save model checkpoints.

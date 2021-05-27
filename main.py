@@ -31,7 +31,7 @@ def main(config):
     if config.dataset in ['CACD']:
         CACD_loader = get_loader2(config.CACD_image_dir, config.CACD_attr_path, config.age_group, config.age_group_mode,
                                 config.CACD_crop_size, config.image_size, config.batch_size,
-                                'CACD', config.mode, config.num_workers)
+                                'CACD', config.additional_dataset, config.mode, config.num_workers)
 
     if config.dataset in ['CelebA', 'Both']:
         celeba_loader = get_loader(config.celeba_image_dir, config.attr_path, config.selected_attrs,
@@ -65,20 +65,20 @@ if __name__ == '__main__':
     parser.add_argument('--c_dim', type=int, default=5, help='dimension of domain labels (1st dataset)')
     parser.add_argument('--c2_dim', type=int, default=8, help='dimension of domain labels (2nd dataset)')
     parser.add_argument('--celeba_crop_size', type=int, default=178, help='crop size for the CelebA dataset')
-    parser.add_argument('--CACD_crop_size', type=int, default=178, help='crop size for the CelebA dataset')
+    parser.add_argument('--CACD_crop_size', type=int, default=200, help='crop size for the CelebA dataset')
     parser.add_argument('--rafd_crop_size', type=int, default=256, help='crop size for the RaFD dataset')
     parser.add_argument('--image_size', type=int, default=128, help='image resolution')
     parser.add_argument('--g_conv_dim', type=int, default=64, help='number of conv filters in the first layer of G')
     parser.add_argument('--d_conv_dim', type=int, default=64, help='number of conv filters in the first layer of D')
     parser.add_argument('--g_repeat_num', type=int, default=6, help='number of residual blocks in G')
     parser.add_argument('--d_repeat_num', type=int, default=6, help='number of strided conv layers in D')
-    parser.add_argument('--lambda_cls', type=float, default=1, help='weight for domain classification loss')
-    parser.add_argument('--lambda_rec', type=float, default=10, help='weight for reconstruction loss')
+    parser.add_argument('--lambda_cls', type=float, default=10, help='weight for domain classification loss')
+    parser.add_argument('--lambda_rec', type=float, default=1, help='weight for reconstruction loss')
     parser.add_argument('--lambda_gp', type=float, default=10, help='weight for gradient penalty')
     parser.add_argument('--lambda_KL', type=float, default=10, help='weight for KL DIV loss')
-    parser.add_argument('--lambda_ID', type=float, default=10, help='weight for Identity loss')
-    parser.add_argument('--lambda_ma', type=float, default=10, help='weight for Identity loss')
-    parser.add_argument('--lambda_ms', type=float, default=10, help='weight for Identity loss')
+    parser.add_argument('--lambda_ID', type=float, default=1, help='weight for Identity loss')
+    parser.add_argument('--lambda_ma', type=float, default=1, help='weight for Identity loss')
+    parser.add_argument('--lambda_ms', type=float, default=0.001, help='weight for Identity loss')
 
 
     parser.add_argument('--age_group', type=int, default=5, help='number of age groups')
@@ -133,6 +133,7 @@ if __name__ == '__main__':
     parser.add_argument('--age_group_mode', type = int, default = 2)
     parser.add_argument('--attention', type = str2bool, default = True)
     parser.add_argument('--mask_discriminator', type = str2bool, default = False)
+    parser.add_argument('--additional_dataset', type = str2bool, default = True)
     
 
 
