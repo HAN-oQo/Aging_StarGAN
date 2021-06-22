@@ -82,6 +82,7 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_gan', type=float, default=1, help='weight for Identity loss')
     parser.add_argument('--lambda_inter', type=float, default=1, help='weight for Identity loss')
     parser.add_argument('--lambda_tri', type=float, default=10, help='weight for Identity loss')
+    parser.add_argument('--lambda_feat', type=float, default=0.01, help='weight for Identity loss')
     
 
     parser.add_argument('--age_group', type=int, default=4, help='number of age groups')
@@ -90,8 +91,8 @@ if __name__ == '__main__':
     # Training configuration.
     parser.add_argument('--dataset', type=str, default='CACD', choices=['CelebA', 'RaFD', 'CACD','Both'])
     parser.add_argument('--batch_size', type=int, default=16, help='mini-batch size')
-    parser.add_argument('--num_iters', type=int, default=400000, help='number of total iterations for training D')
-    parser.add_argument('--num_iters_decay', type=int, default=200000, help='number of iterations for decaying lr')
+    parser.add_argument('--num_iters', type=int, default=200000, help='number of total iterations for training D')
+    parser.add_argument('--num_iters_decay', type=int, default=100000, help='number of iterations for decaying lr')
     parser.add_argument('--g_lr', type=float, default=0.0001, help='learning rate for G')
     parser.add_argument('--d_lr', type=float, default=0.0001, help='learning rate for D')
     parser.add_argument('--n_critic', type=int, default=5, help='number of D updates per each G update')

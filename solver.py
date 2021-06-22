@@ -47,7 +47,7 @@ class Solver(object):
         self.lambda_gan = config.lambda_gan
         self.lambda_inter = config.lambda_inter
         self.lambda_tri = config.lambda_tri
-
+        self.lambda_feat = config.lambda_feat
 
 
         # Training configurations.
@@ -372,27 +372,27 @@ class Solver(object):
                 # out_src_id , out_cls_id = self.D(x_id.detach())
                 # d_loss_id = torch.mean(out_src_id)
                 #######
-                if self.inter == True:
-                    x_fake_A, mask_fake_A = self.G(x_real, c_trg_A)
-                    x_fake_A = mask_fake_A * x_real + (1-mask_fake_A) * x_fake_A    
-                    x_fake_A_0, mask_fake_A_0 = self.G(x_fake_A, c_trg)
-                    x_fake_A_0 = mask_fake_A_0 * x_fake_A + (1 -mask_fake_A_0) * x_fake_A_0
-                    x_fake_0_A, mask_fake_0_A = self.G(x_fake, c_trg_A)
-                    x_fake_0_A = mask_fake_0_A * x_fake + (1-mask_fake_0_A) * x_fake_0_A
+                # if self.inter == True:
+                #     x_fake_A, mask_fake_A = self.G(x_real, c_trg_A)
+                #     x_fake_A = mask_fake_A * x_real + (1-mask_fake_A) * x_fake_A    
+                #     x_fake_A_0, mask_fake_A_0 = self.G(x_fake_A, c_trg)
+                #     x_fake_A_0 = mask_fake_A_0 * x_fake_A + (1 -mask_fake_A_0) * x_fake_A_0
+                #     x_fake_0_A, mask_fake_0_A = self.G(x_fake, c_trg_A)
+                #     x_fake_0_A = mask_fake_0_A * x_fake + (1-mask_fake_0_A) * x_fake_0_A
 
  
             out_src, out_cls = self.D(x_fake.detach())
             d_loss_fake = torch.mean(out_src)
-            if self.inter == True:
-                out_src_A ,out_cls_A = self.D(x_fake_A.detach())
-                d_loss_fake_A = torch.mean(out_src_A)
-                # inter relation gan loss
-                # ============================================
-                out_src_A_0, out_cls_A_0 = self.D(x_fake_A_0.detach())
-                d_loss_fake_A_0 = self.GANLoss(out_src_A_0, False)
-                out_src_0_A, out_cls_0_A = self.D(x_fake_0_A.detach())
-                d_loss_fake_0_A = self.GANLoss(out_src_0_A, False)
-                d_loss_inter_gan = d_loss_fake_0_A + d_loss_fake_A_0
+            # if self.inter == True:
+            #     out_src_A ,out_cls_A = self.D(x_fake_A.detach())
+            #     d_loss_fake_A = torch.mean(out_src_A)
+            #     # inter relation gan loss
+            #     # ============================================
+            #     out_src_A_0, out_cls_A_0 = self.D(x_fake_A_0.detach())
+            #     d_loss_fake_A_0 = self.GANLoss(out_src_A_0, False)
+            #     out_src_0_A, out_cls_0_A = self.D(x_fake_0_A.detach())
+            #     d_loss_fake_0_A = self.GANLoss(out_src_0_A, False)
+            #     d_loss_inter_gan = d_loss_fake_0_A + d_loss_fake_A_0
                 # =============================================
             # Compute loss for gradient penalty.
             alpha = torch.rand(x_real.size(0), 1, 1, 1).to(self.device)
@@ -479,7 +479,7 @@ class Solver(object):
                 # print(x_fake.size())
                 # print(torch.mean(torch.abs(x_real - x_id), dim= [1,2,3], keepdim = False), torch.mean(torch.abs(x_real - x_id)).size())
 
-                margin = 0.02 * margin_power
+                margin = 0.025 * margin_power
                 # print(margin, margin.size())
                 #TripleMarginLoss = nn.TripletMarginLoss(margin, p =1).to(self.device)
                 TripletMarginLoss = torch.mean(torch.abs(x_real - x_id), dim= [1,2,3], keepdim = False) - torch.mean(torch.abs(x_real-x_fake), dim= [1,2,3], keepdim = False)
@@ -506,6 +506,12 @@ class Solver(object):
 
                     g_mask_activation_loss =  self.mask_activation_loss(mask_fake) + self.mask_activation_loss(mask_reconst) + self.mask_activation_loss(mask_id)
                     #g_mask_smooth_loss = self.mask_smooth_loss(mask_fake) + self.mask_smooth_loss(mask_reconst)
+                    # in_out0 = torch.mean(torch.abs(x_fake*mask_fake - x_real*mask_fake))
+                    # in_out1 = torch.mean(torch.abs(x_id*mask_id - x_real*mask_id))
+                    # out_out = torch.mean(torch.abs(x_id*mask_id - x_fake*mask_fake))
+                    # g_loss_feat = in_out0 + in_out1 + out_out
+
+
 
                     if self.inter == True:
                         x_fake_A, mask_fake_A = self.G(x_real, c_trg_A)
@@ -548,7 +554,9 @@ class Solver(object):
                     g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls
                 else:
                     if self.inter != True:
-                        g_loss =  self.lambda_gan * g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls + self.lambda_tri * g_loss_tri + self.lambda_ma *g_mask_activation_loss #+ self.lambda_ms * g_mask_smooth_loss 
+                        g_loss =  self.lambda_gan * g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls \
+                                + self.lambda_tri * g_loss_tri + self.lambda_ma *g_mask_activation_loss\
+                                    + self.lambda_feat * g_loss_feat #+ self.lambda_ms * g_mask_smooth_loss 
                     else: 
                         g_loss = g_loss_fake + g_loss_fake_A + g_loss_inter_gan \
                                 + self.lambda_rec * g_loss_rec \
@@ -567,7 +575,7 @@ class Solver(object):
                 if self.attention == True:
                     loss['G/loss_tri'] = g_loss_tri.item()
                     loss['G/loss_mask_activation'] = g_mask_activation_loss.item()
-                    #loss['G/loss_mask_smooth'] = g_mask_smooth_loss.item()
+                    loss['G/loss_feat'] = g_loss_feat.item()
                     if self.inter == True:
                         loss['G/loss_inter'] = g_loss_inter.item()
                         loss['G/loss_inter_gan'] = g_loss_inter_gan.item()
@@ -935,15 +943,26 @@ class Solver(object):
 
                     # Translate images.
                     x_fake_list = [x_real]
-                    for c_trg in c_trg_list:
-                        x_fake, mask_fake = self.G(x_real, c_trg)
-                        x_fake = mask_fake * x_real + (1-mask_fake)* x_fake
-                        x_fake_list.append(x_fake)
+                    if self.attention == True:
+                        x_mask_list = []
+                        for c_trg in c_trg_list:
+                            x_fake, mask_fake = self.G(x_real, c_trg)
+                            x_fake = mask_fake * x_real + (1-mask_fake)* x_fake
+                            x_fake_list.append(x_fake)
+                            x_mask_list.append(mask_fake)
+                    else:
+                        for c_trg in c_trg_list:
+                            x_fake = self.G(x_real, c_trg)
+                            x_fake_list.append(x_fake)
 
                     # Save the translated images.
                     x_concat = torch.cat(x_fake_list, dim=3)
                     result_path = os.path.join(self.result_dir, '{}-images.jpg'.format(i+1))
                     save_image(self.denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+                    if self.attention == True:
+                        mask_concat = torch.cat(x_mask_list, dim=3)
+                        mask_result_path = os.path.join(self.result_dir, '{}-mask.jpg'.format(i+1))
+                        save_image(mask_concat.data.cpu(), mask_result_path, nrow=1, padding=0, normalize = True)
                     print('Saved real and fake images into {}...'.format(result_path))
 
 

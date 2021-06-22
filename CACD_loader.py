@@ -70,11 +70,7 @@ class CACD(data.Dataset):
                     if (age >= min_age + j* (dist_age) and age < min_age + (j+1)*(dist_age)):
                         label.append(1)
                         img_age_group = j
-                    # elif max_age ==  (min_age + (j+1)*(dist_age)):
-                    #     if age == max_age: age  25일 때 마지막에 0이 들어가야하는데 그러지 않고 아무것도 들어가지 않는다. 이걸 처리를 해줘야한다. 꼭.
-                    #         label.append(1)
-                    #         img_age_group = j
-                    # maxage가 동일한 경우.. 이거를 고민해줘야할것이다.
+
                     else:
                         if max_age ==  (min_age + (j+1)*(dist_age)):
                             if age == max_age:
@@ -197,25 +193,7 @@ class CACD(data.Dataset):
                     self.train_dataset.append([jpgfile, label])
             
             print("UTKFace dataset loaded")
-            # for i in fgnet_idx:
-            #     filename = utk_list[i]
-            #     jpgfile = os.path.join(fgnet_dir, filename)
-            #     filename0 = filename.split('.')[0]
-            #     age = int(filename0.split('A')[1])
-            #     if age <= 14:
-            #         label = [0]
-            #     elif (age > 14) and (age <= 25):
-            #         label = [1]
-            #     elif (age > 25) and (age <= 40):
-            #         label = [2]
-            #     elif (age > 40) and (age <= 60):
-            #         label = [3]
-            #     elif (age > 60):
-            #         label = [4]
-                
-            #     self.train_dataset.append([jpgfile, label])
-                
-            # print("FGNET dataset loaded")
+
 
         print("test dataset length: ", len(self.test_dataset))
         print("train dataset length: ", len(self.train_dataset))
