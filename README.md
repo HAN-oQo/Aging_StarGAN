@@ -89,6 +89,9 @@ Qualitative Evaluation - (2) Mask Activation
 <p align="center"><img width="100%" src="FIGURES/mask.png" /></p>
 
 Quantitative Evaluation - Age Seperation
-<p align="left"><img src="FIGURES/original_STARGAN.png" /></p>
-<p align="center"><img src="FIGURES/STARGAN+ATTENTION.png" /></p>
-<p align="right"><img src="FIGURES/TRIPLETLOSS.png" /></p>
+<p align="center"><img width ="30%" src="FIGURES/original_STARGAN.png" />  <img width = "30%" src="FIGURES/STARGAN+ATTENTION.png" /> <img width = "30%" src="FIGURES/TRIPLETLOSS.png" /> </p>
+
+
+## Acknowledgements
+This repository is implemented based on [StarGAN Official Repository](https://github.com/yunjey/stargan)
+
