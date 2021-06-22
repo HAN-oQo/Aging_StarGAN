@@ -9,7 +9,7 @@ import numpy as np
 import os
 import time
 import datetime
-from age_classifier_v2 import age_classifier_v2
+# from age_classifier_v2 import age_classifier_v2
 
 # CACD_loss = 'CE'
 # Temperature = 10.0
@@ -25,7 +25,10 @@ class Solver(object):
         self.rafd_loader = rafd_loader
         self.CACD_loader = CACD_loader
         self.attention = config.attention
+        self.inter = config.inter
+        self.test_version = config.test_version
         
+        self.self_attention_model = config.self_attention_model
         # Model configurations.
         self.c_dim = config.c_dim
         self.c2_dim = config.c2_dim
@@ -38,6 +41,15 @@ class Solver(object):
         self.lambda_rec = config.lambda_rec
         self.lambda_gp = config.lambda_gp
         self.lambda_KL = config.lambda_KL
+        self.lambda_ID = config.lambda_ID
+        self.lambda_ma = config.lambda_ma
+        self.lambda_ms = config.lambda_ms
+        self.lambda_gan = config.lambda_gan
+        self.lambda_inter = config.lambda_inter
+        self.lambda_tri = config.lambda_tri
+        self.lambda_feat = config.lambda_feat
+
+
         # Training configurations.
         self.dataset = config.dataset
         self.batch_size = config.batch_size
@@ -52,6 +64,7 @@ class Solver(object):
         self.selected_attrs = config.selected_attrs
         self.age_group = config.age_group
         self.age_group_mode = config.age_group_mode
+        self.age_estimation = config.age_estimation 
         # Test configurations.
         self.test_iters = config.test_iters
 
@@ -70,9 +83,14 @@ class Solver(object):
         self.sample_step = config.sample_step
         self.model_save_step = config.model_save_step
         self.lr_update_step = config.lr_update_step
-
         self.loss_type = config.loss_type
         self.temperature = config.temperature
+
+        
+        self.identity_loss = nn.L1Loss().to(self.device)
+        self.MSELoss = nn.MSELoss().to(self.device)
+        self.L1Loss = nn.L1Loss().to(self.device)
+
         # Build the model and tensorboard.
         self.build_model()
         if self.use_tensorboard:
@@ -83,6 +101,12 @@ class Solver(object):
         # self.classifier = classifier.to(self.device)
         
         # print("Classifier loaded")
+    def mask_activation_loss(self, x):
+        return torch.mean(x)
+
+    def mask_smooth_loss(self, x):
+        return torch.sum(torch.abs(x[:, :, :, :-1] - x[:, :, :, 1:])) + \
+           torch.sum(torch.abs(x[:, :, :-1, :] - x[:, :, 1:, :]))
 
     def build_model(self):
         """Create a generator and a discriminator."""
@@ -92,7 +116,7 @@ class Solver(object):
         elif self.dataset in ['Both']:
             self.G = Generator(self.g_conv_dim, self.c_dim+self.c2_dim+2, self.g_repeat_num)   # 2 for mask vector.
             self.D = Discriminator(self.image_size, self.d_conv_dim, self.c_dim+self.c2_dim, self.d_repeat_num)
-
+            
         self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
         self.print_network(self.G, 'G')
@@ -231,6 +255,13 @@ class Solver(object):
             label = label.long()
             label = label.view(label.size(0))
         return label
+    def GANLoss(self, pred, target= True):
+        if target == True:
+            real_label = Tensor(pred.size()).fill_(1.0)
+            return self.MSELoss(pred, real_label)
+        else:
+            fake_label = Tensor(pred.size()).fill_(0.0)
+            return self.MSELoss(pred, fake_label)
 
     def train(self):
         """Train StarGAN within a single dataset."""
@@ -290,6 +321,10 @@ class Solver(object):
             rand_idx = torch.randperm(label_org.size(0))
             label_trg = label_org[rand_idx]
 
+            if self.inter == True:
+                rand_idx_A = torch.randperm(label_org.size(0))
+                label_trg_A = label_org[rand_idx_A]
+
             if self.dataset == 'CelebA':
                 c_org = label_org.clone()
                 c_trg = label_trg.clone()
@@ -299,6 +334,8 @@ class Solver(object):
             elif self.dataset =='CACD' and self.age_group_mode == 2 :                
                 c_org = self.label2onehot(label_org, self.c_dim)
                 c_trg = self.label2onehot(label_trg, self.c_dim)
+                if self.inter == True:
+                    c_trg_A = self.label2onehot(label_trg_A, self.c_dim)
             elif self.dataset =='CACD' :                
                 c_org = label_org.clone()
                 c_trg = label_trg.clone()
@@ -308,6 +345,11 @@ class Solver(object):
             c_trg = c_trg.to(self.device)             # Target domain labels.
             label_org = label_org.to(self.device)     # Labels for computing classification loss.
             label_trg = label_trg.to(self.device)     # Labels for computing classification loss.
+
+            if self.inter == True:
+                c_trg_A = c_trg_A.to(self.device)
+                label_trg_A = label_trg_A.to(self.device)
+
             # self.classifier = self.classifier.to(self.device)
             # =================================================================================== #
             #                             2. Train the discriminator                              #
@@ -319,18 +361,67 @@ class Solver(object):
             d_loss_cls = self.classification_loss(out_cls, label_org, self.dataset, 'CE')
 
             # Compute loss with fake images.
-            x_fake = self.G(x_real, c_trg)
+            if self.attention != True:
+                x_fake = self.G(x_real, c_trg)
+            else:
+                x_fake, mask_fake  = self.G(x_real, c_trg)
+                x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
+                #######
+                # x_id , mask_id = self.G(x_real, c_org)
+                # x_id = mask_id * x_real + (1-mask_id) * x_id
+                # out_src_id , out_cls_id = self.D(x_id.detach())
+                # d_loss_id = torch.mean(out_src_id)
+                #######
+                # if self.inter == True:
+                #     x_fake_A, mask_fake_A = self.G(x_real, c_trg_A)
+                #     x_fake_A = mask_fake_A * x_real + (1-mask_fake_A) * x_fake_A    
+                #     x_fake_A_0, mask_fake_A_0 = self.G(x_fake_A, c_trg)
+                #     x_fake_A_0 = mask_fake_A_0 * x_fake_A + (1 -mask_fake_A_0) * x_fake_A_0
+                #     x_fake_0_A, mask_fake_0_A = self.G(x_fake, c_trg_A)
+                #     x_fake_0_A = mask_fake_0_A * x_fake + (1-mask_fake_0_A) * x_fake_0_A
+
+ 
             out_src, out_cls = self.D(x_fake.detach())
             d_loss_fake = torch.mean(out_src)
-
+            # if self.inter == True:
+            #     out_src_A ,out_cls_A = self.D(x_fake_A.detach())
+            #     d_loss_fake_A = torch.mean(out_src_A)
+            #     # inter relation gan loss
+            #     # ============================================
+            #     out_src_A_0, out_cls_A_0 = self.D(x_fake_A_0.detach())
+            #     d_loss_fake_A_0 = self.GANLoss(out_src_A_0, False)
+            #     out_src_0_A, out_cls_0_A = self.D(x_fake_0_A.detach())
+            #     d_loss_fake_0_A = self.GANLoss(out_src_0_A, False)
+            #     d_loss_inter_gan = d_loss_fake_0_A + d_loss_fake_A_0
+                # =============================================
             # Compute loss for gradient penalty.
             alpha = torch.rand(x_real.size(0), 1, 1, 1).to(self.device)
             x_hat = (alpha * x_real.data + (1 - alpha) * x_fake.data).requires_grad_(True)
             out_src, _ = self.D(x_hat)
             d_loss_gp = self.gradient_penalty(out_src, x_hat)
+            
+            ####
+            # alpha_id = torch.rand(x_real.size(0), 1, 1, 1).to(self.device)
+            # x_hat_id = (alpha_id * x_real.data + (1 - alpha_id) * x_id.data).requires_grad_(True)
+            # out_src_id, _ = self.D(x_hat_id)
+            # d_loss_gp_id = self.gradient_penalty(out_src_id, x_hat_id)
+
+            # d_loss_fake = d_loss_fake + d_loss_id
+            # d_loss_gp = d_loss_gp + d_loss_gp_id
+            #####
+            if self.inter == True:
+                alpha_A = torch.rand(x_real.size(0), 1, 1, 1).to(self.device)
+                x_hat_A = (alpha_A * x_real.data + (1 - alpha_A) * x_fake_A.data).requires_grad_(True)
+                out_src_A, _ = self.D(x_hat_A)
+                d_loss_gp_A = self.gradient_penalty(out_src_A, x_hat_A)
 
             # Backward and optimize.
-            d_loss = d_loss_real + d_loss_fake + self.lambda_cls * d_loss_cls + self.lambda_gp * d_loss_gp
+            if self.inter != True:
+                d_loss = self.lambda_gan * (d_loss_real + d_loss_fake) + self.lambda_cls * d_loss_cls + self.lambda_gp * d_loss_gp
+            else:
+                d_loss = d_loss_real + d_loss_fake + d_loss_fake_A \
+                        + self.lambda_cls * d_loss_cls + self.lambda_gp * (d_loss_gp + d_loss_gp_A) \
+                        + self.lambda_gan * (d_loss_inter_gan) 
             # d_loss = d_loss_real + d_loss_fake  + self.lambda_gp * d_loss_gp
             self.reset_grad()
             d_loss.backward()
@@ -342,25 +433,116 @@ class Solver(object):
             loss['D/loss_fake'] = d_loss_fake.item()
             loss['D/loss_cls'] = d_loss_cls.item()
             loss['D/loss_gp'] = d_loss_gp.item()
+            if self.inter == True: 
+                loss['D/loss_fake_A'] = d_loss_fake_A.item()
+                loss['D/loss_gp_A'] = d_loss_gp_A.item()
+                loss['D/loss_inter_gan'] = d_loss_inter_gan.item()
+                
+
             
             # =================================================================================== #
             #                               3. Train the generator                                #
             # =================================================================================== #
             
             if (i+1) % self.n_critic == 0:
+
+                # Identity mapping
+                if self.attention != True:
+                    x_id = self.G(x_real, c_org)
+                else:
+                    x_id, mask_id = self.G(x_real, c_org)
+                    x_id = mask_id * x_real + (1-mask_id) * x_id
+
+                out_src_id, out_cls_id = self.D(x_id) 
+                # g_loss_id = - torch.mean(out_src_id)
+                g_loss_cls_id = self.classification_loss(out_cls_id, label_org, self.dataset, 'CE')
+                
+                #g_loss_identity = self.identity_loss(x_id , x_real)
+
                 # Original-to-target domain.
-                x_fake = self.G(x_real, c_trg)
+                if self.attention != True:
+                    x_fake = self.G(x_real, c_trg)
+                else:
+                    x_fake, mask_fake  = self.G(x_real, c_trg)
+                    x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
+
                 out_src, out_cls = self.D(x_fake)
                 g_loss_fake = - torch.mean(out_src)
                 g_loss_cls = self.classification_loss(out_cls, label_trg, self.dataset,'CE')
+                
+                # g_loss_fake = g_loss_fake + g_loss_id
+                g_loss_cls = g_loss_cls + g_loss_cls_id
+                
+                margin_power = torch.abs(label_org - label_trg)
+                # print(margin_power, margin_power.size())
+                # print(x_real.size())
+                # print(x_fake.size())
+                # print(torch.mean(torch.abs(x_real - x_id), dim= [1,2,3], keepdim = False), torch.mean(torch.abs(x_real - x_id)).size())
 
+                margin = 0.025 * margin_power
+                # print(margin, margin.size())
+                #TripleMarginLoss = nn.TripletMarginLoss(margin, p =1).to(self.device)
+                TripletMarginLoss = torch.mean(torch.abs(x_real - x_id), dim= [1,2,3], keepdim = False) - torch.mean(torch.abs(x_real-x_fake), dim= [1,2,3], keepdim = False)
+                # print(TripletMarginLoss, TripletMarginLoss.size())
+                TripletMarginLoss = torch.max ((TripletMarginLoss + margin), torch.Tensor([0.]).to(self.device))
+                # print(TripletMarginLoss, TripletMarginLoss.size())
+                # g_loss_tri = margin_power * TripletMarginLoss(x_real, x_id, x_fake)
+                g_loss_tri = TripletMarginLoss.sum() #/ torch.nonzero(TripletMarginLoss.data).size(0)
+                # g_loss_tri = torch.mean(TripletMarginLoss)
                 # Target-to-original domain.
-                x_reconst = self.G(x_fake, c_org)
-                g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
+                if self.attention != True:
+                    x_reconst = self.G(x_fake, c_org)
+                else:
+                    # trial : x_fake , c_org , x_id, c_trg
+                    x_reconst, mask_reconst = self.G(x_id, c_trg)
+                    x_reconst = mask_reconst * x_id + (1-mask_reconst) * x_reconst
 
 
-                #Identity Mapping
+                    #g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
+                    g_loss_rec = torch.mean(torch.abs(x_fake - x_reconst))
 
+                    # print(mask_fake, mask_fake.size())
+                    # print(mask_reconst, mask_reconst.size())
+
+                    g_mask_activation_loss =  self.mask_activation_loss(mask_fake) + self.mask_activation_loss(mask_reconst) + self.mask_activation_loss(mask_id)
+                    #g_mask_smooth_loss = self.mask_smooth_loss(mask_fake) + self.mask_smooth_loss(mask_reconst)
+                    # in_out0 = torch.mean(torch.abs(x_fake*mask_fake - x_real*mask_fake))
+                    # in_out1 = torch.mean(torch.abs(x_id*mask_id - x_real*mask_id))
+                    # out_out = torch.mean(torch.abs(x_id*mask_id - x_fake*mask_fake))
+                    # g_loss_feat = in_out0 + in_out1 + out_out
+
+
+
+                    if self.inter == True:
+                        x_fake_A, mask_fake_A = self.G(x_real, c_trg_A)
+                        x_fake_A = mask_fake_A * x_real + (1-mask_fake_A) * x_fake_A    
+                        x_fake_A_0, mask_fake_A_0 = self.G(x_fake_A, c_trg)
+                        x_fake_A_0 = mask_fake_A_0 * x_fake_A + (1-mask_fake_A_0) * x_fake_A_0
+                        x_fake_0_A, mask_fake_0_A = self.G(x_fake, c_trg_A)
+                        x_fake_0_A = mask_fake_0_A * x_fake + (1-mask_fake_0_A) * x_fake_0_A
+                        
+                        out_src_A, out_cls_A = self.D(x_fake_A)
+                        out_src_A_0, out_cls_A_0 = self.D(x_fake_A_0)
+                        out_src_0_A, out_cls_0_A = self.D(x_fake_0_A)
+
+                        g_loss_fake_A = - torch.mean(out_src_A)
+                        g_loss_fake_A_0 = self.GANLoss(out_src_A_0, True)
+                        g_loss_fake_0_A = self.GANLoss(out_src_0_A, True)
+
+                        g_loss_cls_A = self.classification_loss(out_cls_A, label_trg_A, self.dataset,'CE')
+                        g_loss_cls_A_0 = self.classification_loss(out_cls_A_0, label_trg, self.dataset,'CE')
+                        g_loss_cls_0_A = self.classification_loss(out_cls_0_A, label_trg_A, self.dataset,'CE')
+
+                        g_mask_activation_loss_A = self.mask_activation_loss(mask_fake_A) + self.mask_activation_loss(mask_fake_A_0) + self.mask_activation_loss(mask_fake_0_A)
+                        g_mask_smooth_loss_A = self.mask_smooth_loss(mask_fake_A) + self.mask_smooth_loss(mask_fake_0_A) + self.mask_smooth_loss(mask_fake_A_0)
+
+                        g_mask_activation_loss = g_mask_activation_loss + g_mask_activation_loss_A
+                        g_mask_smooth_loss = g_mask_smooth_loss + g_mask_smooth_loss_A
+                        g_loss_inter_gan = g_loss_fake_0_A + g_loss_fake_A_0
+                        g_loss_cls = g_loss_cls + g_loss_cls_A
+                        g_loss_inter_cls = g_loss_cls_A_0 + g_loss_cls_0_A
+                        g_loss_inter = self.L1Loss(x_fake_A_0, x_fake) + self.L1Loss(x_fake_0_A, x_fake_A)
+                         
 
                 # real_pred, reg_loss0 = self.classifier(x_real)
                 # fake_pred, reg_loss1 = self.classifier(x_fake)
@@ -368,7 +550,19 @@ class Solver(object):
                 # print(fake_pred, fake_pred.size())
                 # KLloss =  self.classification_loss( fake_pred, real_pred, self.dataset,'LOGIT_MSE')
                 # Backward and optimize.
-                g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls
+                if self.attention != True:
+                    g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls
+                else:
+                    if self.inter != True:
+                        g_loss =  self.lambda_gan * g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls \
+                                + self.lambda_tri * g_loss_tri + self.lambda_ma *g_mask_activation_loss\
+                                    + self.lambda_feat * g_loss_feat #+ self.lambda_ms * g_mask_smooth_loss 
+                    else: 
+                        g_loss = g_loss_fake + g_loss_fake_A + g_loss_inter_gan \
+                                + self.lambda_rec * g_loss_rec \
+                                + self.lambda_cls * (g_loss_cls+g_loss_inter_cls)\
+                                + self.lambda_tri * g_loss_tri + self.lambda_inter * g_loss_inter \
+                                + self.lambda_ma *g_mask_activation_loss #+ self.lambda_ms * g_mask_smooth_loss 
                 # g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_KL * KLloss
                 self.reset_grad()
                 g_loss.backward()
@@ -378,6 +572,15 @@ class Solver(object):
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_rec'] = g_loss_rec.item()
                 loss['G/loss_cls'] = g_loss_cls.item()
+                if self.attention == True:
+                    loss['G/loss_tri'] = g_loss_tri.item()
+                    loss['G/loss_mask_activation'] = g_mask_activation_loss.item()
+                    loss['G/loss_feat'] = g_loss_feat.item()
+                    if self.inter == True:
+                        loss['G/loss_inter'] = g_loss_inter.item()
+                        loss['G/loss_inter_gan'] = g_loss_inter_gan.item()
+                        loss['G/loss_inter_cls'] = g_loss_inter_cls.item()
+
                 # loss['G/loss_KL_div'] = KLloss.item()
 
             # =================================================================================== #
@@ -399,14 +602,33 @@ class Solver(object):
 
             # Translate fixed images for debugging.
             if (i+1) % self.sample_step == 0:
-                with torch.no_grad():
-                    x_fake_list = [x_fixed]
-                    for c_fixed in c_fixed_list:
-                        x_fake_list.append(self.G(x_fixed, c_fixed))
-                    x_concat = torch.cat(x_fake_list, dim=3)
-                    sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
-                    save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
-                    print('Saved real and fake images into {}...'.format(sample_path))
+                if self.attention != True:
+                    with torch.no_grad():
+                        x_fake_list = [x_fixed]
+                        for c_fixed in c_fixed_list:
+                            x_fake_list.append(self.G(x_fixed, c_fixed))
+                        x_concat = torch.cat(x_fake_list, dim=3)
+                        sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
+                        save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
+                        print('Saved real and fake images into {}...'.format(sample_path))
+                else:
+                     with torch.no_grad():
+                        x_fake_list = [x_fixed]
+                        #x_mask_list = [x_fixed]
+                        x_mask_list = []
+                        for c_fixed in c_fixed_list:
+                            images, masks = self.G(x_fixed, c_fixed)
+                            images = masks * x_fixed + (1-masks) * images
+                            x_fake_list.append(images)
+                            x_mask_list.append(masks)
+
+                        x_concat = torch.cat(x_fake_list, dim=3)
+                        mask_concat = torch.cat(x_mask_list, dim=3)
+                        sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
+                        mask_sample_path = os.path.join(self.sample_dir, '{}-masks.jpg'.format(i+1))
+                        save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
+                        save_image(mask_concat.data.cpu(), mask_sample_path, nrow=1, padding=0, normalize = True)
+                        print('Saved real and fake images into {}...'.format(sample_path))
 
             # Save model checkpoints.
             if (i+1) % self.model_save_step == 0:
@@ -508,7 +730,12 @@ class Solver(object):
                 d_loss_cls = self.classification_loss(out_cls, label_org, dataset)
 
                 # Compute loss with fake images.
-                x_fake = self.G(x_real, c_trg)
+                if self.attention != True:
+                    x_fake = self.G(x_real, c_trg)
+                else:
+                    x_fake, mask_fake  = self.G(x_real, c_trg)
+                    x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
+
                 out_src, _ = self.D(x_fake.detach())
                 d_loss_fake = torch.mean(out_src)
 
@@ -536,15 +763,29 @@ class Solver(object):
                 # =================================================================================== #
 
                 if (i+1) % self.n_critic == 0:
+                    if self.attention != True:
+                        x_id = self.G(x_real, c_org)
+                    else:
+                        x_id, mask_id = self.G(x_real, c_org)
+                        x_id = mask_id * x_real + (1-mask_id) * x_id 
+                    
+                    
                     # Original-to-target domain.
-                    x_fake = self.G(x_real, c_trg)
+                    if self.attention != True:
+                        x_fake = self.G(x_real, c_trg)
+                    else:
+                        x_fake, mask_fake  = self.G(x_real, c_trg)
+                        x_fake = mask_fake * x_real + (1-mask_fake) * x_fake
+                        
                     out_src, out_cls = self.D(x_fake)
                     out_cls = out_cls[:, :self.c_dim] if dataset == 'CelebA' else out_cls[:, self.c_dim:]
                     g_loss_fake = - torch.mean(out_src)
                     g_loss_cls = self.classification_loss(out_cls, label_trg, dataset)
 
                     # Target-to-original domain.
+                    
                     x_reconst = self.G(x_fake, c_org)
+                    
                     g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
 
                     # Backward and optimize.
@@ -620,76 +861,111 @@ class Solver(object):
         
         with torch.no_grad():
             for i, (filename, x_real, c_org) in enumerate(data_loader):
-                print(c_org)
-                if self.dataset == 'CACD':
-                    filename = "".join(filename)
-                    for k in range(self.age_group):
-                        dir_name = 'age_group{}'.format(k)
-                        if not os.path.exists(os.path.join(self.result_dir, dir_name)):
-                            os.makedirs(os.path.join(self.result_dir, dir_name))
+                if self.test_version == 0:
 
-                if self.dataset == 'CelebA' or self.dataset == 'RaFD':
-                    # Prepare input images and target domain labels.
-                    filename = "".join(filename)
-                    filenum = filename.split('.')[0]
-                    # print(filenum)
+                    print(c_org)
+                    if self.dataset == 'CACD':
+                        filename = "".join(filename)
+                        for k in range(self.age_group):
+                            dir_name = 'age_group{}'.format(k)
+                            if not os.path.exists(os.path.join(self.result_dir, dir_name)):
+                                os.makedirs(os.path.join(self.result_dir, dir_name))
 
-                    if not os.path.exists(os.path.join(self.result_dir, 'input')):
-                        os.makedirs(os.path.join(self.result_dir, 'input'))
+                    if self.dataset == 'CelebA' or self.dataset == 'RaFD':
+                        # Prepare input images and target domain labels.
+                        filename = "".join(filename)
+                        filenum = filename.split('.')[0]
+                        # print(filenum)
 
-                    if not os.path.exists(os.path.join(self.result_dir, 'output')):
-                        os.makedirs(os.path.join(self.result_dir, 'output'))
+                        if not os.path.exists(os.path.join(self.result_dir, 'input')):
+                            os.makedirs(os.path.join(self.result_dir, 'input'))
+
+                        if not os.path.exists(os.path.join(self.result_dir, 'output')):
+                            os.makedirs(os.path.join(self.result_dir, 'output'))
+                        
+                        real_dir = os.path.join(self.result_dir, 'input')
+                        fake_dir = os.path.join(self.result_dir, 'output')
+
+                        if not os.path.exists(os.path.join(fake_dir, 'aging')):
+                            os.makedirs(os.path.join(fake_dir, 'aging'))
+                        aging_dir = os.path.join(fake_dir, 'aging')
+
+                        real_path = os.path.join(real_dir, '{}.jpg'.format(filenum))
+                        save_image(self.denorm(x_real), real_path)
+                        
                     
-                    real_dir = os.path.join(self.result_dir, 'input')
-                    fake_dir = os.path.join(self.result_dir, 'output')
+                        
+                    x_real = x_real.to(self.device)
+                    if self.dataset == 'CelebA':
+                        c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, self.selected_attrs)
+                    elif self.dataset == 'CACD':
+                        c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, None)
 
-                    if not os.path.exists(os.path.join(fake_dir, 'aging')):
-                        os.makedirs(os.path.join(fake_dir, 'aging'))
-                    aging_dir = os.path.join(fake_dir, 'aging')
+                        # Translate images.
 
-                    real_path = os.path.join(real_dir, '{}.jpg'.format(filenum))
-                    save_image(self.denorm(x_real), real_path)
+                    x_fake_list = [x_real]
+                    for j, c_trg in enumerate(c_trg_list):
+                        if self.attention != True:
+                            x_fake = self.G(x_real, c_trg)
+                        else:
+                            x_fake, mask_fake = self.G(x_real, c_trg)
+                            x_fake = mask_fake * x_real + (1-mask_fake)* x_fake
+                        # x_fake_list.append(self.G(x_real, c_trg))
+                        if self.dataset == 'CelebA':
+                            if j==0:
+                                result_path = os.path.join(fake_dir, 'Black_Hair-{}.jpg'.format(filenum))
+                            elif j==1:
+                                result_path = os.path.join(fake_dir, 'Blond_Hair-{}.jpg'.format(filenum))
+                            
+                            elif j==2:
+                                result_path = os.path.join(fake_dir, 'Brown_Hair-{}.jpg'.format(filenum))
+
+                            elif j==3:
+                                result_path = os.path.join(fake_dir, 'Gender-{}.jpg'.format(filenum))
+
+                            elif j==4:
+                                aging_path = os.path.join(aging_dir, 'Aging-{}.jpg'.format(filenum))
+                                save_image(self.denorm(x_fake.data.cpu()), aging_path)
+                                result_path = os.path.join(fake_dir, 'Aging-{}.jpg'.format(filenum))
+                        
+                        elif self.dataset == 'CACD':
+                            age_path = os.path.join(self.result_dir, 'age_group{}'.format(j))
+                            result_path = os.path.join(age_path, 'age{}_{}.jpg'.format(j, i))
+                            
+                        save_image(self.denorm(x_fake.data.cpu()), result_path)
                     
-                
                     
-                x_real = x_real.to(self.device)
-                if self.dataset == 'CelebA':
+                    print('Saved real and fake images into result path, filenum: {}...'.format(i))
+                else:
+                    
+                    x_real = x_real.to(self.device)
                     c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, self.selected_attrs)
-                elif self.dataset == 'CACD':
-                    c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, None)
 
                     # Translate images.
+                    x_fake_list = [x_real]
+                    if self.attention == True:
+                        x_mask_list = []
+                        for c_trg in c_trg_list:
+                            x_fake, mask_fake = self.G(x_real, c_trg)
+                            x_fake = mask_fake * x_real + (1-mask_fake)* x_fake
+                            x_fake_list.append(x_fake)
+                            x_mask_list.append(mask_fake)
+                    else:
+                        for c_trg in c_trg_list:
+                            x_fake = self.G(x_real, c_trg)
+                            x_fake_list.append(x_fake)
 
-                x_fake_list = [x_real]
-                for j, c_trg in enumerate(c_trg_list):
-                    x_fake = self.G(x_real, c_trg)
-                    # x_fake_list.append(self.G(x_real, c_trg))
-                    if self.dataset == 'CelebA':
-                        if j==0:
-                            result_path = os.path.join(fake_dir, 'Black_Hair-{}.jpg'.format(filenum))
-                        elif j==1:
-                            result_path = os.path.join(fake_dir, 'Blond_Hair-{}.jpg'.format(filenum))
-                        
-                        elif j==2:
-                            result_path = os.path.join(fake_dir, 'Brown_Hair-{}.jpg'.format(filenum))
+                    # Save the translated images.
+                    x_concat = torch.cat(x_fake_list, dim=3)
+                    result_path = os.path.join(self.result_dir, '{}-images.jpg'.format(i+1))
+                    save_image(self.denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+                    if self.attention == True:
+                        mask_concat = torch.cat(x_mask_list, dim=3)
+                        mask_result_path = os.path.join(self.result_dir, '{}-mask.jpg'.format(i+1))
+                        save_image(mask_concat.data.cpu(), mask_result_path, nrow=1, padding=0, normalize = True)
+                    print('Saved real and fake images into {}...'.format(result_path))
 
-                        elif j==3:
-                            result_path = os.path.join(fake_dir, 'Gender-{}.jpg'.format(filenum))
 
-                        elif j==4:
-                            aging_path = os.path.join(aging_dir, 'Aging-{}.jpg'.format(filenum))
-                            save_image(self.denorm(x_fake.data.cpu()), aging_path)
-                            result_path = os.path.join(fake_dir, 'Aging-{}.jpg'.format(filenum))
-                    
-                    elif self.dataset == 'CACD':
-                        age_path = os.path.join(self.result_dir, 'age_group{}'.format(j))
-                        result_path = os.path.join(age_path, 'age{}_{}'.format(j, filename))
-                        
-                    save_image(self.denorm(x_fake.data.cpu()), result_path)
-                
-                
-                print('Saved real and fake images into result path, filenum: {}...'.format(i))
-                    
                 # Save the translated images.
                 
                 # x_concat = torch.cat(x_fake_list, dim=3)

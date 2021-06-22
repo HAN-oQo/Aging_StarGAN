@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 
 spectral_norm = False
+estimation = False
 
 class ResidualBlock(nn.Module):
     """Residual Block with instance normalization."""
@@ -76,7 +77,7 @@ class Generator(nn.Module):
             feat = self.main(x)
             mask = self.attn(feat)
             img = self.chunk(feat)
-            return mask, img
+            return img, mask
         else:
             return self.main(x)
 
@@ -108,11 +109,28 @@ class Discriminator(nn.Module):
             self.conv1 = nn.utils.spectral_norm(nn.Conv2d(curr_dim, 1, kernel_size=3, stride=1, padding=1, bias=False))
             self.conv2 = nn.utils.spectral_norm(nn.Conv2d(curr_dim, c_dim, kernel_size=kernel_size, bias=False))
         else:
-            self.conv1 = nn.Conv2d(curr_dim, 1, kernel_size=3, stride=1, padding=1, bias=False)
-            self.conv2 = nn.Conv2d(curr_dim, c_dim, kernel_size=kernel_size, bias=False)
+            if estimation == True: 
+                self.conv1 = nn.Conv2d(curr_dim, 1, kernel_size=3, stride=1, padding=1, bias=False)
+                self.conv2 = nn.Conv2d(curr_dim, 49, kernel_size=kernel_size, bias=False)
+                self.classifier = nn.Linear(49, c_dim)
+
+            else:
+                self.conv1 = nn.Conv2d(curr_dim, 1, kernel_size=3, stride=1, padding=1, bias=False)
+                self.conv2 = nn.Conv2d(curr_dim, c_dim, kernel_size=kernel_size, bias=False)
         
     def forward(self, x):
-        h = self.main(x)
-        out_src = self.conv1(h)
-        out_cls = self.conv2(h)
-        return out_src, out_cls.view(out_cls.size(0), out_cls.size(1))
+        if estimation != True:
+            h = self.main(x)
+            out_src = self.conv1(h)
+            out_cls = self.conv2(h)
+            return out_src, out_cls.view(out_cls.size(0), out_cls.size(1))
+        else:
+            h = self.main(x)
+            out_src = self.conv1(h)
+            # estimation
+            out_est = self.conv2(h)
+            out_est = out_est.view(out_est.size(0), out_est.size(1))
+            # classification
+            out_cls = self.classifier(out_est)
+
+            return out_src, out_est, out_cls
